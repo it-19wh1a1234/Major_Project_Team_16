@@ -1,0 +1,343 @@
+import pandas as pd
+import numpy as np
+from sklearn import preprocessing
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+df= pd.read_csv('/content/drive/MyDrive/Wednesday-workingHours.pcap_ISCX.csv', engine = 'python', encoding = 'latin1')
+
+df.shape
+
+df['Label'].unique()
+
+df['Label'].value_counts()
+
+df.replace('Infinity', -1, inplace=True)
+
+# Convert "Flow Packets/s" column to numeric
+df["Flow Packets/s"] = pd.to_numeric(df["Flow Packets/s"], errors='coerce')
+
+# Drop rows with missing values in the "Flow Packets/s" column
+df.dropna(subset=["Flow Packets/s"], inplace=True)
+
+df.replace([np.inf, -np.inf, np.nan], -1, inplace=True)
+
+benign_total = len(df[df['Label'] == "BENIGN"])
+benign_total
+
+attack_total = len(df[df['Label'] != "BENIGN"])
+attack_total
+
+df.to_csv("web_attacks_unbalanced.csv", index=False)
+df['Label'].value_counts()
+
+enlargement = 1.1
+benign_included_max = attack_total / 30 * 70
+benign_inc_probability = (benign_included_max / benign_total) * enlargement
+print(benign_included_max, benign_inc_probability)
+
+import random
+indexes = []
+benign_included_count = 0
+for index, row in df.iterrows():
+    if (row['Label'] != "BENIGN"):
+        indexes.append(index)
+    else:
+        # Copying with benign_inc_probability
+        if random.random() > benign_inc_probability: continue
+        # Have we achieved 70% (5087 records)?
+        if benign_included_count > benign_included_max: continue
+        benign_included_count += 1
+        indexes.append(index)
+df_balanced = df.loc[indexes]
+
+df_balanced['Label'].value_counts()
+
+df_balanced.to_csv("web_attacks_balanced.csv", index=False)
+
+df = pd.read_csv('web_attacks_balanced.csv')
+
+df['Label'] = df['Label'].apply(lambda x: 0 if x == 'BENIGN' else 1)
+
+excluded = ['Flow ID', 'Source IP', 'Source Port', 'Destination IP', 'Destination Port', 'Protocol', 'Timestamp']
+df = df.drop(columns=excluded, errors='ignore')
+
+if 'Init_Win_bytes_backward' in df.columns:
+    df['Init_Win_bytes_backward'].hist(figsize=(6,4), bins=10);
+    plt.title("Init_Win_bytes_backward")
+    plt.xlabel("Value bins")
+    plt.ylabel("Density")
+    plt.savefig('Init_Win_bytes_backward.png', dpi=300)
+
+if 'Init_Win_bytes_forward' in df.columns:
+    df['Init_Win_bytes_forward'].hist(figsize=(6,4), bins=10);
+    plt.title("Init_Win_bytes_forward")
+    plt.xlabel("Value bins")
+    plt.ylabel("Density")
+    plt.savefig('Init_Win_bytes_forward.png', dpi=300)
+
+excluded2 = ['Init_Win_bytes_backward', 'Init_Win_bytes_forward']
+df = df.drop(columns=excluded2, errors='ignore')
+
+y = df['Label'].values
+X = df.drop(columns=['Label'])
+print(X.shape, y.shape)
+
+from sklearn.model_selection import train_test_split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+unique, counts = np.unique(y_train, return_counts=True)
+dict(zip(unique, counts))
+
+from imblearn.over_sampling import SMOTE, ADASYN#Synthetic Minority Oversampling Technique
+from collections import Counter
+X_resampled, y_resampled = SMOTE().fit_resample(X_train, y_train)
+print(sorted(Counter(y_resampled).items()))
+
+from sklearn.model_selection import cross_val_score
+from sklearn.tree import DecisionTreeClassifier
+decision_tree = DecisionTreeClassifier(max_leaf_nodes=5, random_state=0)
+decision_tree = decision_tree.fit(X_resampled, y_resampled)
+cross_val_score(decision_tree,X_resampled, y_resampled, cv=10)
+
+from sklearn.tree import export_text
+r = export_text(decision_tree, feature_names=X_resampled.columns.to_list())
+print(r)
+
+from graphviz import Source
+from sklearn import tree
+Source(tree.export_graphviz(decision_tree, out_file=None, feature_names=X.columns))
+
+unique, counts = np.unique(y_test, return_counts=True)
+dict(zip(unique, counts))
+
+from sklearn.metrics import confusion_matrix
+y_pred = decision_tree.predict(X_test)
+confusion_matrix(y_test, y_pred)
+
+import sklearn.metrics as metrics
+accuracy = metrics.accuracy_score(y_test, y_pred)
+precision = metrics.precision_score(y_test, y_pred)
+recall = metrics.recall_score(y_test, y_pred)
+f1 = metrics.f1_score(y_test, y_pred)
+print('Accuracy =', accuracy)
+print('Precision =', precision)
+print('Recall =', recall)
+print('F1 =', f1)
+
+from sklearn.ensemble import RandomForestClassifier
+
+rf = RandomForestClassifier(n_estimators=250, random_state=42, oob_score=True)
+rf.fit(X_resampled, y_resampled)
+# Score = mean accuracy on the given test data and labels
+print('R^2 Training Score: {:.2f} \nR^2 Validation Score: {:.2f} \nOut-of-bag Score: {:.2f}'
+      .format(rf.score(X_resampled, y_resampled), rf.score(X_test, y_test), rf.oob_score_))
+
+features = X.columns
+importances = rf.feature_importances_
+indices = np.argsort(importances)[::-1]
+webattack_features = []
+
+for index, i in enumerate(indices[:20]):
+    webattack_features.append(features[i])
+    print('{}.\t#{}\t{:.3f}\t{}'.format(index + 1, i, importances[i], features[i]))
+
+indices = np.argsort(importances)[-20:]
+plt.rcParams['figure.figsize'] = (10, 6)
+plt.title('Feature Importances')
+plt.barh(range(len(indices)), importances[indices], color='#cccccc', align='center')
+plt.yticks(range(len(indices)), [features[i] for i in indices])
+plt.xlabel('Relative Importance')
+plt.grid()
+plt.savefig('feature_importances.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+y_pred = rf.predict(X_test)
+confusion_matrix(y_test, y_pred)
+
+max_features = 20
+webattack_features = webattack_features[:max_features]
+webattack_features
+
+import sklearn.metrics as metrics
+accuracy = metrics.accuracy_score(y_test, y_pred)
+precision = metrics.precision_score(y_test, y_pred)
+recall = metrics.recall_score(y_test, y_pred)
+f1 = metrics.f1_score(y_test, y_pred)
+print('Accuracy =', accuracy)
+print('Precision =', precision)
+print('Recall =', recall)
+print('F1 =', f1)
+
+import seaborn as sns
+corr_matrix = df[webattack_features].corr()
+plt.rcParams['figure.figsize'] = (16, 5)
+g = sns.heatmap(corr_matrix, annot=True, fmt='.1g', cmap='Greys')
+g.set_xticklabels(g.get_xticklabels(), verticalalignment='top', horizontalalignment='right', rotation=30);
+plt.savefig('corr_heatmap.png', dpi=300, bbox_inches='tight')
+
+to_be_removed = {'Packet Length Mean', 'Avg Fwd Segment Size', 'Subflow Fwd Bytes', 
+                 'Fwd Packets/s', 'Fwd IAT Total', 'Fwd IAT Max'}
+webattack_features = [item for item in webattack_features if item not in to_be_removed]
+webattack_features = webattack_features[:10]
+webattack_features
+
+corr_matrix = df[webattack_features].corr()
+plt.rcParams['figure.figsize'] = (6, 5)
+sns.heatmap(corr_matrix, annot=True, fmt='.1g', cmap='Greys');
+
+from sklearn.model_selection import GridSearchCV
+
+df = pd.read_csv('web_attacks_balanced.csv')
+df['Label'] = df['Label'].apply(lambda x: 0 if x == 'BENIGN' else 1)
+y = df['Label'].values
+X = df[webattack_features]
+print(X.shape, y.shape)
+
+rfc = RandomForestClassifier(random_state=1)
+rfc.get_params().keys()
+
+parameters = {'n_estimators': [10],
+              'min_samples_leaf': [3],
+              'max_features': [3], 
+              'max_depth': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 20, 30, 50]}
+scoring = {'f1', 'accuracy'}
+gcv = GridSearchCV(rfc, parameters, scoring=scoring, refit='f1', cv=10, return_train_score=True)
+get_ipython().run_line_magic('time', 'gcv.fit(X, y)')
+results = gcv.cv_results_
+
+cv_results = pd.DataFrame(gcv.cv_results_)
+cv_results.head()
+
+parameters = {'n_estimators': [30, 50, 70], 
+              'min_samples_leaf': [3, 5, 7],
+              'max_features': [3, 5, 7, 10], 
+              'max_depth': [10, 17, 23]}
+
+# parameters = {'n_estimators': [250]}
+
+gcv = GridSearchCV(rfc, parameters, scoring=scoring, refit='f1', cv=3, return_train_score=True)
+get_ipython().run_line_magic('time', 'gcv.fit(X, y)')
+
+gcv.best_estimator_ 
+
+gcv.best_params_
+
+gcv.best_score_
+
+X_resampled, X_test, y_resampled, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+print(X_resampled.shape, y_resampled.shape)
+print(X_test.shape, y_test.shape)
+
+rfc = RandomForestClassifier(max_depth=17, max_features=10, min_samples_leaf=3, n_estimators=50, random_state=42, oob_score=True)
+# rfc = RandomForestClassifier(n_estimators=250, random_state=1)
+rfc.fit(X_resampled, y_resampled)
+
+features = X.columns
+importances = rfc.feature_importances_
+indices = np.argsort(importances)[::-1]
+    
+for index, i in enumerate(indices[:10]):
+    print('{}.\t#{}\t{:.3f}\t{}'.format(index + 1, i, importances[i], features[i]))
+
+y_pred = rfc.predict(X_test)
+confusion_matrix(y_test, y_pred)
+
+import pickle
+with open('webattack_detection_rf_model.pkl', 'wb') as f:
+    pickle.dump(rfc, f)
+
+with open('webattack_detection_rf_model.pkl', 'rb') as f:
+    rfc = pickle.load(f)
+rfc
+
+import pandas as pd
+import numpy as np
+from sklearn import preprocessing
+
+dataframe1=pd.read_csv('/content/drive/MyDrive/Realtime.csv',engine='python',encoding='latin1')
+
+print(dataframe1.columns)
+
+dataframe1.replace('Infinity', -1, inplace=True)
+
+# Convert "Flow Bytes/s" and "Flow Packets/s" columns to numeric, excluding "Flow Bytes/s" column
+numeric_cols = ["Flow Packets/s"]
+dataframe1[numeric_cols] = dataframe1[numeric_cols].apply(pd.to_numeric, errors='coerce')
+
+# Drop rows with missing values in the numeric columns
+dataframe1.dropna(subset=numeric_cols, inplace=True)
+
+dataframe1.replace([np.inf, -np.inf, np.nan], -1, inplace=True)
+
+print(dataframe1['Label'])
+dataframe1['Label'] = dataframe1['Label'].apply(lambda x: 0 if x=='BENIGN' else 1)
+y1_test = dataframe1['Label'].values
+excluded = ['Flow ID', 'Src IP', 'Src Port', 'Dst IP','Destination Port','Total Fwd Packets',
+       'Total Length of Fwd Packets',
+       'Total Length of Bwd Packets', 'Fwd Packet Length Max',
+       'Fwd Packet Length Min', 'Fwd Packet Length Mean',
+       'Fwd Packet Length Std', 'Bwd Packet Length Max',
+       'Bwd Packet Length Min', 'Bwd Packet Length Mean',
+       'Bwd Packet Length Std', 'Flow Bytes/s',
+       'Flow IAT Std','Flow IAT Min',
+       'Fwd IAT Total','Fwd IAT Std', 'Fwd IAT Max',
+       'Fwd IAT Min', 'Bwd IAT Total', 'Bwd IAT Mean', 'Bwd IAT Std',
+       'Bwd IAT Max', 'Bwd IAT Min', 'Fwd PSH Flags', 'Bwd PSH Flags',
+       'Fwd URG Flags', 'Bwd URG Flags', 'Fwd Header Length',
+       'Bwd Header Length', 'Fwd Packets/s',
+       'Max Packet Length', 'Packet Length Mean',
+       'Packet Length Std', 'Packet Length Variance', 'FIN Flag Count',
+       'SYN Flag Count', 'RST Flag Count', 'PSH Flag Count', 'ACK Flag Count',
+       'URG Flag Count', 'CWE Flag Count', 'ECE Flag Count', 'Down/Up Ratio',
+       'Average Packet Size', 'Avg Fwd Segment Size', 'Avg Bwd Segment Size',
+       'Fwd Header Length.1', 'Fwd Avg Bytes/Bulk', 'Fwd Avg Packets/Bulk',
+       'Fwd Avg Bulk Rate', 'Bwd Avg Bytes/Bulk', 'Bwd Avg Packets/Bulk',
+       'Bwd Avg Bulk Rate', 'Subflow Fwd Packets', 'Subflow Fwd Bytes',
+       'Subflow Bwd Bytes', 'Init_Win_bytes_forward',
+       'Init_Win_bytes_backward', 'act_data_pkt_fwd',
+       'Active Mean', 'Active Std', 'Active Max', 'Active Min', 'Idle Mean',
+       'Idle Std', 'Idle Max', 'Idle Min', 'Label'
+       ]
+X1_test = dataframe1.drop(columns=excluded, errors='ignore')
+print(X1_test.shape, y1_test.shape)
+# ' Fwd Packet Length Mean', ' act_data_pkt_fwd', ' Fwd Packet Length Max', 'Total Length of Fwd Packets', ' Fwd IAT Std',' Bwd Packet Length Std',' Bwd Packet Length Mean', ' Avg Fwd Segment Size',' Fwd Header Length','Subflow Fwd Packets',
+
+X1_test.head()
+
+import time
+seconds = time.time()
+
+print("Total operation time:", time.time() - seconds, "seconds")
+# Get the column names of the training data
+train_cols = X_resampled.columns
+
+# Reorder the columns of the test data to match the order of the training data
+X1_test = X1_test[train_cols]
+
+# Call the predict method on the reordered test data
+y2_pred = rfc.predict(X1_test)
+
+print("Benign records detected (0), attacks detected (1):")
+unique, counts = np.unique(y2_pred, return_counts=True)
+dict(zip(unique, counts))
+
+predict = pd.DataFrame({'Predict': rfc.predict(X_test)})
+label = pd.DataFrame({'Label': y_test})
+result = X_test.join(predict)
+
+result[result['Predict'] == 1]
+
+import sklearn.metrics as metrics
+accuracy = metrics.accuracy_score(y1_test, y2_pred)
+precision = metrics.precision_score(y1_test, y2_pred)
+recall = metrics.recall_score(y1_test, y2_pred)
+f1 = metrics.f1_score(y1_test, y2_pred)
+print('Accuracy =', accuracy)
+print('Precision =', precision)
+print('Recall =', recall)
+print('F1 =', f1)
+
